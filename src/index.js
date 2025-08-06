@@ -10,11 +10,14 @@ const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 /* 3.1 Verificación de Webhook (GET) */
 app.get("/webhook", (req, res) => {
+  console.log(req.query);
   const {
     "hub.mode": mode,
     "hub.verify_token": token,
     "hub.challenge": challenge,
   } = req.query;
+  console.log(mode, token, challenge);
+
   if (mode === "subscribe" && token === process.env.VERIFY_TOKEN) {
     return res.status(200).send(challenge);
   }
