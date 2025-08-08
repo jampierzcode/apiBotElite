@@ -84,9 +84,15 @@ app.post("/webhook", async (req, res) => {
       await sendText(from, saludoMenu());
       break;
     case "Inscripciones":
-      await sendText(from, linkInscripcion());
-      await sendImage(from, "https://…/medio1.jpeg");
-      await sendImage(from, "https://…/medio2.jpeg");
+      await sendTextUrl(from, linkInscripcion());
+      await sendImage(
+        from,
+        "https://inscripciones.academiapreuniversitariaelite.com/images/mediopagoelite1.jpeg"
+      );
+      await sendImage(
+        from,
+        "https://inscripciones.academiapreuniversitariaelite.com/images/mediopagoelite2.jpeg"
+      );
       break;
     case "Beneficios":
       await sendText(from, beneficiosTexto());
@@ -107,7 +113,7 @@ app.post("/webhook", async (req, res) => {
 app.post("/form/inscripciones", async (req, res) => {
   const data = req.body; // mismo JSON que envías desde tu landing
   const conn = await pool(); // función pool() definida abajo
-  const [result] = await conn.query("INSERT INTO usuarios SET ?", {
+  const [result] = await conn.query("INSERT INTO persons SET ?", {
     nombres: data.nombres,
     apellidos: data.apellidos,
     numero_whatsapp:
@@ -124,7 +130,6 @@ app.post("/form/inscripciones", async (req, res) => {
 /* ---------------- Utils ---------------- */
 
 async function sendText(to, body) {
-  console.log(body);
   try {
     const { data } = await axios.post(
       `https://graph.facebook.com/v23.0/${process.env.PHONE_NUMBER_ID}/messages`,
@@ -153,32 +158,94 @@ async function sendText(to, body) {
     throw err; // haz que burbujee
   }
 }
+async function sendTextUrl(to, body) {
+  try {
+    const { data } = await axios.post(
+      `https://graph.facebook.com/v23.0/${process.env.PHONE_NUMBER_ID}/messages`,
+      {
+        messaging_product: "whatsapp",
+        recipient_type: "individual",
+        to, // 5215512345678  (E.164, sin +)
+        type: "text",
+        text: {
+          preview_url: true,
+          body: body,
+        },
+      },
+      {
+        headers: {
+          "Content-Type": "application/json", // OBLIGATORIO
+          Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}`,
+        },
+      }
+    );
+
+    console.log("WA response →", data);
+    return data;
+  } catch (err) {
+    console.error("WA error →", err.response?.data ?? err.message);
+    throw err; // haz que burbujee
+  }
+}
 
 async function sendImage(to, link) {
   return axios.post(
-    `https://graph.facebook.com/v19.0/${process.env.PHONE_NUMBER_ID}/messages`,
+    `https://graph.facebook.com/v23.0/${process.env.PHONE_NUMBER_ID}/messages`,
     {
       messaging_product: "whatsapp",
       to,
       type: "image",
       image: { link },
     },
-    { headers: { Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}` } }
+    {
+      headers: {
+        "Content-Type": "application/json", // OBLIGATORIO
+        Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}`,
+      },
+    }
   );
 }
 
 function saludoMenu() {
   /* tu texto */
-  return "Hola bienvenido a elite";
+  return `
+  🙌Hola Bienvenido al EduBot de ÉLITE tenemos las siguientes opciones para tí:
+
+-*Beneficios*
+-*Solicitar una inscripcion*
+-*Renovar Pago de mensualidad*
+
+🟢 DIRECCIÓN:
+ CALLE BOLIVAR  #347(4 casas más arriba del colegio de abogados) 
+2DA SEDE: CALLE BOLIVAR #294 (a espaldas de la genovesa o al costado de la cámara de comercio)
+  `;
 }
 function linkInscripcion() {
-  return "Claro, inscríbete aquí: https://…";
+  return `Claro que si te estaremos redirigiendo a este enlace para tu suscripcion:
+https://inscripciones.academiapreuniversitariaelite.com/
+`;
 }
 function beneficiosTexto() {
-  /* ... */
+  return `
+    💪📚 CALIDAD Y EXPERIENCIA....UNETE YA!!!
+🟢BENEFICIOS y VENTAJAS DE ESTUDIAR EN LA ACADEMIA ÉLITE:
+🛑Exámenes simulacros semanales                                                                                  🛑Acceso a un drive:
+✔️Prácticas
+✔️Solucionarios
+✔️Clases grabadas
+
+🛑Acceso a libros con teoria y practicas para entrenar (digital)
+🛑Profesores especialistas por cada curso
+🛑Desarrollo de cursos segun tu canal.
+🛑Tutoría y Mentoría
+🛑Préstamo de libros para estudiar en casa con tu DNI
+  `;
 }
 function pedirDocumentoTexto() {
-  /* ... */
+  return `
+    Hola🙋🏻‍♀️ para renovar tu pago es necesario que nos envíes tu *DOCUMENTO DE IDENTIDAD*
+EJEMPLO: DNI(8digitos) o CARNET DE EXTRANJERÍA(hasta 20 dígitos)
+  `;
 }
 
 async function handleRenovacion(documento, to) {
