@@ -8,23 +8,24 @@ const app = express();
 app.use(express.json());
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-/* 3.1 Verificación de Webhook (GET) */
+/* =====================================================================
+   Webhook WhatsApp Cloud API (Meta)
+   ===================================================================== */
+
+/* GET → verificación */
 app.get("/webhook", (req, res) => {
-  console.log(req.query);
   const {
     "hub.mode": mode,
     "hub.verify_token": token,
     "hub.challenge": challenge,
   } = req.query;
-  console.log(mode, token, challenge);
-
   if (mode === "subscribe" && token === process.env.VERIFY_TOKEN) {
     return res.status(200).send(challenge);
   }
   return res.sendStatus(403);
 });
 
-/* 3.2 Recepción de mensajes (POST) */
+/* POST → recepción de mensajes entrantes */
 app.post("/webhook", async (req, res) => {
   try {
     const change = req.body?.entry?.[0]?.changes?.[0]?.value;
@@ -35,7 +36,6 @@ app.post("/webhook", async (req, res) => {
     const msg = change.messages[0];
     const from = change.contacts[0].wa_id;
     const text = msg.text?.body ?? "";
-    console.log(msg, from, text);
 
     // Clasificar intención con OpenAI
     const completion = await openai.chat.completions.create({
@@ -44,9 +44,9 @@ app.post("/webhook", async (req, res) => {
         {
           role: "system",
           content: `En base a esta intención del usuario: "${text}"
-    
+
           Clasifica la intencion en uno de estos tipos:
-    
+
           "Inscripciones"
           "Información o Saludo"
           "Información de Ubicacion"
@@ -58,9 +58,9 @@ app.post("/webhook", async (req, res) => {
           "Historial de pagos realizados sin documento"
           "Renovar pago sin documento de identidad"
           "Renovar pago con documento de identidad"
-    
-          📤 IMPORTANTE: Devuelve ÚNICAMENTE un JSON válido con esta estructura exacta:
-    
+
+          📤 IMPORTANTE: Devuelve ÚNICAMENTE un JSON válido con esta estructura:
+
           {
             "tipo_mensaje": "uno de los tipos anteriores",
             "documento": "puede ser vacío o el número si lo menciona"
@@ -75,52 +75,48 @@ app.post("/webhook", async (req, res) => {
     const { tipo_mensaje, documento } = JSON.parse(
       completion.choices[0].message.content
     );
-    console.log(tipo_mensaje, documento);
 
     let respuesta;
-
     switch (tipo_mensaje) {
       case "Información de Ubicacion":
-        respuesta = await sendText(from, saludoMenu());
-        break;
       case "Información o Saludo":
-        respuesta = await sendText(from, saludoMenu());
+        respuesta = await sendText(from, await saludoMenu());
         break;
       case "Inscripciones":
-        await sendTextUrl(from, linkInscripcion());
-        await sendImage(
-          from,
-          "https://inscripciones.academiapreuniversitariaelite.com/images/mediopagoelite1.jpeg"
-        );
-        await sendImage(
-          from,
-          "https://inscripciones.academiapreuniversitariaelite.com/images/mediopagoelite2.jpeg"
-        );
+        await sendTextUrl(from, await linkInscripcion());
+        try {
+          const imagenes = await getMetodosPagoImagenes();
+          for (const img of imagenes) {
+            await sendImage(from, img.url, img.descripcion || undefined);
+          }
+        } catch (e) {
+          console.error("Error enviando imágenes de pago →", e.message);
+        }
         respuesta = { ok: true, msg: "Inscripciones enviadas" };
         break;
       case "Beneficios":
-        respuesta = await sendText(from, beneficiosTexto());
-        break;
-      case "Renovar pago sin documento de identidad":
-        respuesta = await sendText(from, pedirDocumentoTexto());
-        break;
-      case "Renovar pago con documento de identidad":
-        respuesta = await handleRenovacion(documento, from);
+        respuesta = await sendText(from, await beneficiosTexto());
         break;
       case "Ciclos Aperturados":
-        respuesta = await handleGetCiclos(from);
-        break;
       case "Ciclos Para FASE I":
-        respuesta = await handleGetCiclos(from);
-        break;
       case "Ciclos Para FASE II":
         respuesta = await handleGetCiclos(from);
+        break;
+      // Renovación de pagos: pendiente de implementación (Fase C)
+      case "Renovar pago sin documento de identidad":
+      case "Renovar pago con documento de identidad":
+      case "Historial de pagos realizados con documento":
+      case "Historial de pagos realizados sin documento":
+        respuesta = await sendText(
+          from,
+          "Por ahora la renovación de pagos en línea no está disponible. Acércate a la academia o escribe a un asesor."
+        );
+        void documento;
         break;
       default:
         respuesta = await sendText(from, "No logré entender tu solicitud 🤖");
     }
 
-    // Ahora sí respondemos a quien hizo la petición
     res.status(200).json({ ok: true, respuesta });
   } catch (error) {
     console.error("Error en webhook →", error.message);
@@ -128,25 +124,67 @@ app.post("/webhook", async (req, res) => {
   }
 });
 
-/* 3.3 Endpoints de formularios (POST) */
-app.post("/form/inscripciones", async (req, res) => {
-  const data = req.body; // mismo JSON que envías desde tu landing
-  const conn = await pool(); // función pool() definida abajo
-  const [result] = await conn.query("INSERT INTO persons SET ?", {
-    nombres: data.nombres,
-    apellidos: data.apellidos,
-    numero_whatsapp:
-      data.celular.length === 9 ? `51${data.celular}` : data.celular,
-    correo: data.correo,
-    status: data.status,
-    documento: data.documento,
-  });
-  // Insertar matrícula, pagos, etc. igual que en tu flujo n8n
-  await sendText(data.celular, `✅ Felicitaciones ${data.nombres}…`);
-  res.json({ ok: true });
+/* =====================================================================
+   Endpoint interno para notificaciones del sistema
+   Lo llama el backend Adonis cuando llega una solicitud de matrícula nueva.
+   Lee el número de notificaciones de la tabla `configuracion` (BD compartida)
+   y envía un WhatsApp con los datos.
+   ===================================================================== */
+
+app.post("/notify-solicitud", async (req, res) => {
+  // Token interno simple para evitar que cualquiera pegue al endpoint
+  const token = req.headers["x-internal-token"];
+  if (token !== process.env.NOTIFY_INTERNAL_TOKEN) {
+    return res.status(401).json({ ok: false, error: "no autorizado" });
+  }
+
+  try {
+    const {
+      nombre,
+      apellido,
+      dni,
+      whatsapp,
+      ciclo,
+      modalidad,
+      turno,
+      sede,
+      solicitudId,
+    } = req.body;
+
+    const numero = await getWhatsappNotificaciones();
+    if (!numero) {
+      return res.status(200).json({
+        ok: false,
+        warning: "Sin número de notificaciones configurado",
+      });
+    }
+
+    const mensaje = await construirMensajeSolicitud({
+      nombre,
+      apellido,
+      dni,
+      whatsapp,
+      ciclo,
+      modalidad,
+      turno,
+      sede,
+      solicitudId,
+    });
+
+    const data = await sendText(numero, mensaje);
+    return res.json({ ok: true, data });
+  } catch (err) {
+    console.error("notify-solicitud error →", err.response?.data ?? err.message);
+    return res.status(500).json({ ok: false, error: err.message });
+  }
 });
 
-/* ---------------- Utils ---------------- */
+/* Health */
+app.get("/", (_req, res) => res.json({ ok: true, service: "apiBotElite" }));
+
+/* =====================================================================
+   Helpers WhatsApp Cloud API
+   ===================================================================== */
 
 async function sendText(to, body) {
   try {
@@ -155,16 +193,13 @@ async function sendText(to, body) {
       {
         messaging_product: "whatsapp",
         recipient_type: "individual",
-        to, // 5215512345678  (E.164, sin +)
+        to,
         type: "text",
-        text: {
-          preview_url: false,
-          body: body,
-        },
+        text: { preview_url: false, body },
       },
       {
         headers: {
-          "Content-Type": "application/json", // OBLIGATORIO
+          "Content-Type": "application/json",
           Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}`,
         },
       }
@@ -172,9 +207,10 @@ async function sendText(to, body) {
     return data;
   } catch (err) {
     console.error("WA error →", err.response?.data ?? err.message);
-    throw err; // haz que burbujee
+    throw err;
   }
 }
+
 async function sendTextUrl(to, body) {
   try {
     const { data } = await axios.post(
@@ -182,156 +218,130 @@ async function sendTextUrl(to, body) {
       {
         messaging_product: "whatsapp",
         recipient_type: "individual",
-        to, // 5215512345678  (E.164, sin +)
+        to,
         type: "text",
-        text: {
-          preview_url: true,
-          body: body,
-        },
+        text: { preview_url: true, body },
       },
       {
         headers: {
-          "Content-Type": "application/json", // OBLIGATORIO
+          "Content-Type": "application/json",
           Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}`,
         },
       }
     );
-
-    console.log("WA response →", data);
     return data;
   } catch (err) {
     console.error("WA error →", err.response?.data ?? err.message);
-    throw err; // haz que burbujee
+    throw err;
   }
 }
 
-async function sendImage(to, link) {
-  return axios.post(
-    `https://graph.facebook.com/v23.0/${process.env.PHONE_NUMBER_ID}/messages`,
-    {
-      messaging_product: "whatsapp",
-      to,
-      type: "image",
-      image: { link },
-    },
-    {
-      headers: {
-        "Content-Type": "application/json", // OBLIGATORIO
-        Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}`,
-      },
-    }
-  );
+/* =====================================================================
+   Helpers de texto / queries
+   ===================================================================== */
+
+async function linkInscripcion() {
+  const url = process.env.MATRICULA_PUBLICA_URL || "";
+  if (url) {
+    return `Claro que sí, te redirijo al enlace para tu inscripción:\n${url}`;
+  }
+  return "Acércate a la academia para inscribirte. Pronto tendremos el enlace de inscripción en línea.";
 }
 
-function saludoMenu() {
-  /* tu texto */
-  return `
-  🙌Hola Bienvenido al EduBot de ÉLITE tenemos las siguientes opciones para tí:
+async function beneficiosTexto() {
+  const cfg = await getConfiguracion();
+  if (cfg?.beneficios && cfg.beneficios.trim()) return cfg.beneficios.trim();
+  return "Pronto compartiremos contigo los beneficios de estudiar en nuestra academia.";
+}
+
+async function saludoMenu() {
+  const cfg = await getConfiguracion();
+  const nombre = cfg?.nombre_empresa || "ÉLITE";
+  const direccion = cfg?.direccion_principal || "";
+  return `🙌 Hola, bienvenido al EduBot de *${nombre}*. Tenemos las siguientes opciones:
 
 - *Beneficios*
-- *Solicitar una inscripcion*
-- *Renovar Pago de mensualidad*
+- *Solicitar inscripción*
+- *Renovar pago*
 
-🟢 DIRECCIÓN:
- CALLE BOLIVAR  #347(4 casas más arriba del colegio de abogados) 
-2DA SEDE: CALLE BOLIVAR #294 (a espaldas de la genovesa o al costado de la cámara de comercio)
-  `;
-}
-function linkInscripcion() {
-  return `Claro que si te estaremos redirigiendo a este enlace para tu suscripcion:
-https://inscripciones.academiapreuniversitariaelite.com/
-`;
-}
-function beneficiosTexto() {
-  return `
-    💪📚 CALIDAD Y EXPERIENCIA....UNETE YA!!!
-🟢BENEFICIOS y VENTAJAS DE ESTUDIAR EN LA ACADEMIA ÉLITE:
-🛑Exámenes simulacros semanales                                                                                  🛑Acceso a un drive:
-✔️Prácticas
-✔️Solucionarios
-✔️Clases grabadas
-
-🛑Acceso a libros con teoria y practicas para entrenar (digital)
-🛑Profesores especialistas por cada curso
-🛑Desarrollo de cursos segun tu canal.
-🛑Tutoría y Mentoría
-🛑Préstamo de libros para estudiar en casa con tu DNI
-  `;
-}
-function pedirDocumentoTexto() {
-  return `
-    Hola🙋🏻‍♀️ para renovar tu pago es necesario que nos envíes tu *DOCUMENTO DE IDENTIDAD*
-EJEMPLO: DNI(8digitos) o CARNET DE EXTRANJERÍA(hasta 20 dígitos)
-  `;
+🟢 DIRECCIÓN: ${direccion || "consulta nuestras sedes"}`;
 }
 
-async function handleRenovacion(documento, to) {
-  const conn = await pool();
-  const [rows] = await conn.query(/* tu SELECT complejo */);
-  if (!rows.length) return sendText(to, pedirDocumentoTexto());
-
-  const estado = rows[0].estado_pago;
-  if (estado === "Al día") return sendText(to, "✅ Tus pagos están al día.");
-  if (estado === "En deuda (pago vencido)")
-    return sendText(
-      to,
-      `⚠️ Toca renovar aquí: https://.../renovaciones?documento=${documento}`
-    );
-}
 async function handleGetCiclos(to) {
   const conn = await pool();
   const [rows] = await conn.query("SELECT * FROM ciclos WHERE status = 1");
-  console.log(rows);
   if (!rows.length) {
-    return sendText(to, "Aún no tenemos cursos disponibles.");
+    return sendText(to, "Aún no tenemos ciclos disponibles.");
   }
 
-  // Armamos el mensaje
-  let mensaje =
-    "👋 Hola, tenemos los siguientes ciclos aperturados para ti:\n\n";
-
+  let mensaje = "👋 Hola, tenemos los siguientes ciclos aperturados:\n\n";
   rows.forEach((ciclo, index) => {
-    mensaje += `📘 *${ciclo.nombre.toUpperCase()}*\n`;
-    mensaje += `📅 Inicio: ${new Date(ciclo.fecha_inicio).toLocaleDateString(
-      "es-PE"
-    )}\n`;
-    mensaje += `📅 Fin: ${new Date(ciclo.fecha_fin).toLocaleDateString(
-      "es-PE"
-    )}\n\n`;
-
+    mensaje += `📘 *${(ciclo.nombre || "").toUpperCase()}*\n`;
+    if (ciclo.fecha_inicio)
+      mensaje += `📅 Inicio: ${new Date(ciclo.fecha_inicio).toLocaleDateString("es-PE")}\n`;
+    if (ciclo.fecha_fin)
+      mensaje += `📅 Fin: ${new Date(ciclo.fecha_fin).toLocaleDateString("es-PE")}\n\n`;
     mensaje += `*Modalidades:*\n`;
     mensaje += `🏫 *Presencial*\n`;
-    mensaje += `• Matrícula: S/ ${Number(
-      ciclo.montoMatriculaPresencial
-    ).toFixed(2)}\n`;
-    mensaje += `• Mensualidad: S/ ${Number(
-      ciclo.montoMensualidadPresencial
-    ).toFixed(2)}\n\n`;
-
+    mensaje += `• Matrícula: S/ ${Number(ciclo.montoMatriculaPresencial || 0).toFixed(2)}\n`;
+    mensaje += `• Mensualidad: S/ ${Number(ciclo.montoMensualidadPresencial || 0).toFixed(2)}\n\n`;
     mensaje += `💻 *Virtual*\n`;
-    mensaje += `• Matrícula: S/ ${Number(ciclo.montoMatriculaVirtual).toFixed(
-      2
-    )}\n`;
-    mensaje += `• Mensualidad: S/ ${Number(
-      ciclo.montoMensualidadVirtual
-    ).toFixed(2)}\n`;
-
-    // Separador entre ciclos
-    if (index !== rows.length - 1) {
-      mensaje += `\n──────────────────────\n\n`;
-    }
+    mensaje += `• Matrícula: S/ ${Number(ciclo.montoMatriculaVirtual || 0).toFixed(2)}\n`;
+    mensaje += `• Mensualidad: S/ ${Number(ciclo.montoMensualidadVirtual || 0).toFixed(2)}\n`;
+    if (index !== rows.length - 1) mensaje += `\n──────────────────────\n\n`;
   });
-  // 👉 Incentivo final
-  mensaje += `\n✨ ¡No pierdas tu lugar! Regístrate ahora en el siguiente enlace:\n👉 https://inscripciones.academiapreuniversitariaelite.com/`;
+  mensaje += `\n✨ ¡Inscríbete ya!\n👉 https://inscripciones.academiapreuniversitariaelite.com/`;
 
   return sendTextUrl(to, mensaje);
 }
+
+async function construirMensajeSolicitud({
+  nombre,
+  apellido,
+  dni,
+  whatsapp,
+  ciclo,
+  modalidad,
+  turno,
+  sede,
+  solicitudId,
+}) {
+  const cfg = await getConfiguracion();
+  const adminUrl = (cfg?.admin_url || "").trim();
+
+  const lineas = [
+    "📝 *Nueva solicitud de matrícula*",
+    "",
+    `*Solicitante:* ${nombre || ""} ${apellido || ""}`.trim(),
+  ];
+  if (dni) lineas.push(`*DNI:* ${dni}`);
+  if (whatsapp) lineas.push(`*WhatsApp:* ${whatsapp}`);
+  if (ciclo) lineas.push(`*Ciclo:* ${ciclo}`);
+  if (modalidad)
+    lineas.push(`*Modalidad:* ${modalidad}${turno ? " — " + turno : ""}`);
+  if (sede) lineas.push(`*Sede:* ${sede}`);
+  if (solicitudId)
+    lineas.push(`*Código:* SOL-${String(solicitudId).padStart(6, "0")}`);
+  lineas.push("");
+  if (adminUrl) {
+    const url = `${adminUrl.replace(/\/$/, "")}/solicitudes-matricula/${solicitudId}`;
+    lineas.push(`👉 Ver en sistema: ${url}`);
+  } else {
+    lineas.push("Revisa la solicitud en el sistema para aprobarla.");
+  }
+  return lineas.join("\n");
+}
+
+/* =====================================================================
+   BD compartida
+   ===================================================================== */
 
 let _pool;
 function pool() {
   if (_pool) return _pool;
   _pool = mysql.createPool({
     host: process.env.DB_HOST,
+    port: Number(process.env.DB_PORT) || 3306,
     user: process.env.DB_USER,
     database: process.env.DB_NAME,
     password: process.env.DB_PASS,
@@ -340,8 +350,60 @@ function pool() {
   return _pool;
 }
 
-/* 3.4 Lanzar servidor */
-const PORT = process.env.PORT || 3000;
+async function getConfiguracion() {
+  try {
+    const conn = await pool();
+    const [rows] = await conn.query(
+      "SELECT * FROM configuracion WHERE id = 1 LIMIT 1"
+    );
+    return rows[0] || null;
+  } catch {
+    return null;
+  }
+}
+
+async function getWhatsappNotificaciones() {
+  const cfg = await getConfiguracion();
+  return cfg?.whatsapp_notificaciones || null;
+}
+
+async function getMetodosPagoImagenes() {
+  // Pedimos al backend para obtener URLs firmadas vivas
+  try {
+    const baseUrl = process.env.BACKEND_PUBLIC_URL || "http://localhost:4336";
+    const res = await axios.get(
+      `${baseUrl.replace(/\/$/, "")}/api/public/metodos-pago-imagenes`,
+      { timeout: 5000 }
+    );
+    return res.data?.data || [];
+  } catch {
+    return [];
+  }
+}
+
+async function sendImage(to, link, caption) {
+  return axios.post(
+    `https://graph.facebook.com/v23.0/${process.env.PHONE_NUMBER_ID}/messages`,
+    {
+      messaging_product: "whatsapp",
+      to,
+      type: "image",
+      image: caption ? { link, caption } : { link },
+    },
+    {
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}`,
+      },
+    }
+  );
+}
+
+/* =====================================================================
+   Bootstrap
+   ===================================================================== */
+
+const PORT = process.env.PORT || 3001;
 app.listen(PORT, () =>
-  console.log("🚀 API WhatsApp corriendo en puerto", PORT)
+  console.log(`🚀 API WhatsApp/Bot escuchando en :${PORT}`)
 );
