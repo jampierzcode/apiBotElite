@@ -54,16 +54,11 @@ app.post("/webhook", async (req, res) => {
           "Ciclos Aperturados"
           "Ciclos Para FASE I"
           "Ciclos Para FASE II"
-          "Historial de pagos realizados con documento"
-          "Historial de pagos realizados sin documento"
-          "Renovar pago sin documento de identidad"
-          "Renovar pago con documento de identidad"
 
           📤 IMPORTANTE: Devuelve ÚNICAMENTE un JSON válido con esta estructura:
 
           {
-            "tipo_mensaje": "uno de los tipos anteriores",
-            "documento": "puede ser vacío o el número si lo menciona"
+            "tipo_mensaje": "uno de los tipos anteriores"
           }
           `,
         },
@@ -72,7 +67,7 @@ app.post("/webhook", async (req, res) => {
       response_format: { type: "json_object" },
     });
 
-    const { tipo_mensaje, documento } = JSON.parse(
+    const { tipo_mensaje } = JSON.parse(
       completion.choices[0].message.content
     );
 
@@ -101,17 +96,6 @@ app.post("/webhook", async (req, res) => {
       case "Ciclos Para FASE I":
       case "Ciclos Para FASE II":
         respuesta = await handleGetCiclos(from);
-        break;
-      // Renovación de pagos: pendiente de implementación (Fase C)
-      case "Renovar pago sin documento de identidad":
-      case "Renovar pago con documento de identidad":
-      case "Historial de pagos realizados con documento":
-      case "Historial de pagos realizados sin documento":
-        respuesta = await sendText(
-          from,
-          "Por ahora la renovación de pagos en línea no está disponible. Acércate a la academia o escribe a un asesor."
-        );
-        void documento;
         break;
       default:
         respuesta = await sendText(from, "No logré entender tu solicitud 🤖");
@@ -241,11 +225,9 @@ async function sendTextUrl(to, body) {
    ===================================================================== */
 
 async function linkInscripcion() {
-  const url = process.env.MATRICULA_PUBLICA_URL || "";
-  if (url) {
-    return `Claro que sí, te redirijo al enlace para tu inscripción:\n${url}`;
-  }
-  return "Acércate a la academia para inscribirte. Pronto tendremos el enlace de inscripción en línea.";
+  const url =
+    process.env.MATRICULA_PUBLICA_URL || "https://matricula-publica.vercel.app/";
+  return `Claro que sí, te redirijo al enlace para tu inscripción:\n${url}`;
 }
 
 async function beneficiosTexto() {
@@ -262,7 +244,6 @@ async function saludoMenu() {
 
 - *Beneficios*
 - *Solicitar inscripción*
-- *Renovar pago*
 
 🟢 DIRECCIÓN: ${direccion || "consulta nuestras sedes"}`;
 }
