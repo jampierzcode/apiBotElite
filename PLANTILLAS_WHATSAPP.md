@@ -8,9 +8,13 @@ ya te escribieron).
 
 ## Cómo crearlas
 1. Entra a **WhatsApp Manager → Cuentas de WhatsApp Business → Plantillas de mensajes**.
-2. Crea cada plantilla con categoría **Utility (Utilidad)** e idioma **Español (es)**.
-3. Pega el cuerpo tal cual (las variables van como `{{1}}`, `{{2}}`, `{{3}}`).
-4. Cuando Meta las apruebe, pon el nombre de cada una en Railway.
+2. Crea cada plantilla con categoría **Utility (Utilidad)**.
+3. **Tipo de variable: `Número`** (NO "Nombre"). El bot manda variables por
+   posición; si eliges "Nombre" el editor marca error con `{{1}}`.
+4. **Idioma:** anota el código exacto que elijas (p. ej. "Spanish" = `es`,
+   "Spanish (MEX)" = `es_MX`) y ponlo en `WHATSAPP_TEMPLATE_LANG` en Railway.
+5. Pega el cuerpo tal cual (variables `{{1}}`, `{{2}}`, `{{3}}`).
+6. Cuando Meta las apruebe, pon el nombre de cada una en Railway.
 
 ## Plantilla 1 — Confirmación de solicitud
 - **Nombre sugerido:** `solicitud_recibida`
@@ -37,6 +41,7 @@ Una vez aprobadas, agrega (usando los nombres exactos que registraste en Meta):
 ```
 WHATSAPP_TEMPLATE_CONFIRMACION=solicitud_recibida
 WHATSAPP_TEMPLATE_APROBACION=matricula_aprobada
+WHATSAPP_TEMPLATE_LANG=es_MX   # debe coincidir EXACTO con el idioma de la plantilla en Meta
 MATRICULA_PUBLICA_URL=https://<tu-dominio-de-matricula-publica>
 ```
 Sin estas variables el bot envía texto libre (solo entrega a números que ya

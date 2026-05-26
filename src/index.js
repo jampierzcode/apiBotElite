@@ -378,7 +378,12 @@ async function sendText(to, body) {
  * debe existir y estar aprobada en WhatsApp Manager.
  * @param {string[]} bodyParams Variables {{1}}, {{2}}... del cuerpo, en orden.
  */
-async function sendTemplate(to, templateName, bodyParams = [], lang = "es") {
+async function sendTemplate(
+  to,
+  templateName,
+  bodyParams = [],
+  lang = process.env.WHATSAPP_TEMPLATE_LANG || "es"
+) {
   try {
     const { data } = await axios.post(
       `https://graph.facebook.com/v23.0/${process.env.PHONE_NUMBER_ID}/messages`,
