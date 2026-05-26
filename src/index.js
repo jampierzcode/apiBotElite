@@ -27,86 +27,204 @@ app.get("/webhook", (req, res) => {
 
 /* POST → recepción de mensajes entrantes */
 app.post("/webhook", async (req, res) => {
+  // Acusamos recibo a Meta de inmediato para que no reintente (los reintentos
+  // generan mensajes duplicados). El agente procesa en segundo plano.
+  res.sendStatus(200);
+
   try {
     const change = req.body?.entry?.[0]?.changes?.[0]?.value;
-    if (!change?.messages) {
-      return res.status(200).json({ ok: true, msg: "No hay mensajes" });
-    }
+    const msg = change?.messages?.[0];
+    if (!msg) return;
 
-    const msg = change.messages[0];
     const from = change.contacts[0].wa_id;
     const text = msg.text?.body ?? "";
+    if (!text.trim()) return;
 
-    // Clasificar intención con OpenAI
-    const completion = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
-      messages: [
-        {
-          role: "system",
-          content: `En base a esta intención del usuario: "${text}"
-
-          Clasifica la intencion en uno de estos tipos:
-
-          "Inscripciones"
-          "Información o Saludo"
-          "Información de Ubicacion"
-          "Beneficios"
-          "Ciclos Aperturados"
-          "Ciclos Para FASE I"
-          "Ciclos Para FASE II"
-
-          📤 IMPORTANTE: Devuelve ÚNICAMENTE un JSON válido con esta estructura:
-
-          {
-            "tipo_mensaje": "uno de los tipos anteriores"
-          }
-          `,
-        },
-        { role: "user", content: text },
-      ],
-      response_format: { type: "json_object" },
-    });
-
-    const { tipo_mensaje } = JSON.parse(
-      completion.choices[0].message.content
-    );
-
-    let respuesta;
-    switch (tipo_mensaje) {
-      case "Información de Ubicacion":
-      case "Información o Saludo":
-        respuesta = await sendText(from, await saludoMenu());
-        break;
-      case "Inscripciones":
-        await sendTextUrl(from, await linkInscripcion());
-        try {
-          const imagenes = await getMetodosPagoImagenes();
-          for (const img of imagenes) {
-            await sendImage(from, img.url, img.descripcion || undefined);
-          }
-        } catch (e) {
-          console.error("Error enviando imágenes de pago →", e.message);
-        }
-        respuesta = { ok: true, msg: "Inscripciones enviadas" };
-        break;
-      case "Beneficios":
-        respuesta = await sendText(from, await beneficiosTexto());
-        break;
-      case "Ciclos Aperturados":
-      case "Ciclos Para FASE I":
-      case "Ciclos Para FASE II":
-        respuesta = await handleGetCiclos(from);
-        break;
-      default:
-        respuesta = await sendText(from, "No logré entender tu solicitud 🤖");
-    }
-
-    res.status(200).json({ ok: true, respuesta });
+    await responderConAgente(from, text);
   } catch (error) {
-    console.error("Error en webhook →", error.message);
-    res.status(500).json({ ok: false, error: error.message });
+    console.error("Error en webhook →", error.response?.data ?? error.message);
   }
 });
+
+/* =====================================================================
+   Agente conversacional (OpenAI tool calling)
+   El modelo redacta la respuesta con naturalidad y consulta datos reales
+   de la academia mediante "herramientas" (ciclos, pagos, etc.).
+   ===================================================================== */
+
+// Memoria de conversación por número: últimos turnos (en memoria, suficiente
+// para conversaciones activas; se pierde si Railway reinicia).
+const HISTORIAL_MAX = 10;
+const historiales = new Map(); // wa_id -> [{ role, content }]
+
+function systemPrompt(nombreEmpresa) {
+  return `Eres "Élite Bot", el asistente virtual de la academia preuniversitaria ${nombreEmpresa}, atendiendo por WhatsApp a futuros alumnos y apoderados.
+
+Tono: cálido, cercano y profesional, en español peruano. Respuestas CORTAS (2 a 5 líneas). Usa emojis con moderación.
+
+Formato OBLIGATORIO de WhatsApp (no es Markdown):
+- Negritas con UN solo asterisco: *texto*. NUNCA uses doble asterisco **texto**.
+- Los enlaces van como URL cruda (https://...), NUNCA en formato [texto](url).
+
+Cómo trabajas:
+- Tienes herramientas para consultar datos reales de la academia (datos generales, ciclos y precios, link de inscripción, métodos de pago). Úsalas cuando las necesites en lugar de suponer.
+- Usa SOLO la información que devuelven las herramientas. NUNCA inventes precios, fechas, horarios ni promociones.
+- Si te preguntan algo que no puedes responder con tus herramientas, dilo con naturalidad y ofrece que un asesor lo contacte.
+- No muestres un "menú" rígido; conversa de forma natural y guía al usuario a inscribirse cuando tenga sentido.
+- Si el usuario quiere inscribirse, dale el link. Si pregunta cómo o dónde pagar, envíale los métodos de pago.`;
+}
+
+const TOOLS = [
+  {
+    type: "function",
+    function: {
+      name: "datos_empresa",
+      description:
+        "Datos generales de la academia: nombre, dirección, beneficios, email y WhatsApp de contacto. Úsalo para saludos, ubicación, beneficios o información general.",
+      parameters: { type: "object", properties: {}, additionalProperties: false },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "listar_ciclos",
+      description:
+        "Lista los ciclos disponibles ahora con sus precios de matrícula y mensualidad (presencial y virtual). Úsalo cuando pregunten por ciclos, precios, costos o cuándo empieza.",
+      parameters: { type: "object", properties: {}, additionalProperties: false },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "link_inscripcion",
+      description:
+        "Devuelve el enlace para inscribirse/matricularse online. Úsalo cuando el usuario quiera inscribirse o matricularse.",
+      parameters: { type: "object", properties: {}, additionalProperties: false },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "enviar_metodos_pago",
+      description:
+        "Envía al usuario las imágenes de los métodos de pago (cuentas, Yape, etc.) y devuelve sus descripciones. Úsalo cuando pregunten cómo o dónde pagar.",
+      parameters: { type: "object", properties: {}, additionalProperties: false },
+    },
+  },
+];
+
+async function ejecutarHerramienta(name, _args, from) {
+  switch (name) {
+    case "datos_empresa": {
+      const cfg = await getConfiguracion();
+      return {
+        nombre: cfg?.nombre_empresa || null,
+        direccion: cfg?.direccion_principal || null,
+        beneficios: cfg?.beneficios || null,
+        email: cfg?.email_contacto || null,
+        whatsapp: cfg?.whatsapp_contacto || null,
+      };
+    }
+    case "listar_ciclos": {
+      const ciclos = await getCiclosActivos();
+      if (!ciclos.length) return { ciclos: [], nota: "No hay ciclos disponibles por ahora." };
+      return {
+        moneda: "PEN (S/)",
+        ciclos: ciclos.map((c) => ({
+          nombre: c.nombre,
+          inicio: c.fecha_inicio ? new Date(c.fecha_inicio).toLocaleDateString("es-PE") : null,
+          fin: c.fecha_fin ? new Date(c.fecha_fin).toLocaleDateString("es-PE") : null,
+          presencial: {
+            matricula: Number(c.montoMatriculaPresencial || 0),
+            mensualidad: Number(c.montoMensualidadPresencial || 0),
+          },
+          virtual: {
+            matricula: Number(c.montoMatriculaVirtual || 0),
+            mensualidad: Number(c.montoMensualidadVirtual || 0),
+          },
+        })),
+      };
+    }
+    case "link_inscripcion":
+      return {
+        url: process.env.MATRICULA_PUBLICA_URL || "https://matricula-publica.vercel.app/",
+      };
+    case "enviar_metodos_pago": {
+      const imgs = await getMetodosPagoImagenes();
+      for (const img of imgs) {
+        try {
+          await sendImage(from, img.url, img.descripcion || undefined);
+        } catch (e) {
+          console.error("img pago →", e.message);
+        }
+      }
+      return {
+        enviadas: imgs.length,
+        metodos: imgs.map((i) => i.descripcion).filter(Boolean),
+        nota: imgs.length
+          ? "Imágenes de pago ya enviadas al usuario."
+          : "No hay métodos de pago configurados; ofrece contactar a un asesor.",
+      };
+    }
+    default:
+      return { error: "herramienta desconocida" };
+  }
+}
+
+async function responderConAgente(from, text) {
+  const cfg = await getConfiguracion();
+  const nombreEmpresa = cfg?.nombre_empresa || "la academia";
+
+  const historial = historiales.get(from) || [];
+  const messages = [
+    { role: "system", content: systemPrompt(nombreEmpresa) },
+    ...historial,
+    { role: "user", content: text },
+  ];
+
+  let respuestaFinal = null;
+  // Hasta 4 vueltas: el modelo puede pedir herramientas y luego redactar.
+  for (let i = 0; i < 4; i++) {
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages,
+      tools: TOOLS,
+      tool_choice: "auto",
+    });
+    const m = completion.choices[0].message;
+    messages.push(m);
+
+    if (m.tool_calls?.length) {
+      for (const tc of m.tool_calls) {
+        let args = {};
+        try {
+          args = tc.function.arguments ? JSON.parse(tc.function.arguments) : {};
+        } catch {
+          args = {};
+        }
+        const result = await ejecutarHerramienta(tc.function.name, args, from);
+        messages.push({
+          role: "tool",
+          tool_call_id: tc.id,
+          content: JSON.stringify(result),
+        });
+      }
+      continue; // volver a consultar al modelo con los resultados
+    }
+
+    respuestaFinal = m.content;
+    break;
+  }
+
+  if (respuestaFinal && respuestaFinal.trim()) {
+    await sendTextUrl(from, respuestaFinal.trim());
+  }
+
+  // Persistir solo los turnos de texto (no las llamadas a herramientas).
+  const nuevoHist = [...historial, { role: "user", content: text }];
+  if (respuestaFinal) nuevoHist.push({ role: "assistant", content: respuestaFinal });
+  historiales.set(from, nuevoHist.slice(-HISTORIAL_MAX));
+}
 
 /* =====================================================================
    Endpoint interno para notificaciones del sistema
@@ -206,56 +324,15 @@ async function sendTextUrl(to, body) {
    Helpers de texto / queries
    ===================================================================== */
 
-async function linkInscripcion() {
-  const url =
-    process.env.MATRICULA_PUBLICA_URL || "https://matricula-publica.vercel.app/";
-  return `Claro que sí, te redirijo al enlace para tu inscripción:\n${url}`;
-}
-
-async function beneficiosTexto() {
-  const cfg = await getConfiguracion();
-  if (cfg?.beneficios && cfg.beneficios.trim()) return cfg.beneficios.trim();
-  return "Pronto compartiremos contigo los beneficios de estudiar en nuestra academia.";
-}
-
-async function saludoMenu() {
-  const cfg = await getConfiguracion();
-  const nombre = cfg?.nombre_empresa || "ÉLITE";
-  const direccion = cfg?.direccion_principal || "";
-  return `🙌 Hola, bienvenido al EduBot de *${nombre}*. Tenemos las siguientes opciones:
-
-- *Beneficios*
-- *Solicitar inscripción*
-
-🟢 DIRECCIÓN: ${direccion || "consulta nuestras sedes"}`;
-}
-
-async function handleGetCiclos(to) {
-  const conn = await pool();
-  const [rows] = await conn.query("SELECT * FROM ciclos WHERE status = 1");
-  if (!rows.length) {
-    return sendText(to, "Aún no tenemos ciclos disponibles.");
+async function getCiclosActivos() {
+  try {
+    const conn = await pool();
+    const [rows] = await conn.query("SELECT * FROM ciclos WHERE status = 1");
+    return rows;
+  } catch (e) {
+    console.error("getCiclosActivos →", e.message);
+    return [];
   }
-
-  let mensaje = "👋 Hola, tenemos los siguientes ciclos aperturados:\n\n";
-  rows.forEach((ciclo, index) => {
-    mensaje += `📘 *${(ciclo.nombre || "").toUpperCase()}*\n`;
-    if (ciclo.fecha_inicio)
-      mensaje += `📅 Inicio: ${new Date(ciclo.fecha_inicio).toLocaleDateString("es-PE")}\n`;
-    if (ciclo.fecha_fin)
-      mensaje += `📅 Fin: ${new Date(ciclo.fecha_fin).toLocaleDateString("es-PE")}\n\n`;
-    mensaje += `*Modalidades:*\n`;
-    mensaje += `🏫 *Presencial*\n`;
-    mensaje += `• Matrícula: S/ ${Number(ciclo.montoMatriculaPresencial || 0).toFixed(2)}\n`;
-    mensaje += `• Mensualidad: S/ ${Number(ciclo.montoMensualidadPresencial || 0).toFixed(2)}\n\n`;
-    mensaje += `💻 *Virtual*\n`;
-    mensaje += `• Matrícula: S/ ${Number(ciclo.montoMatriculaVirtual || 0).toFixed(2)}\n`;
-    mensaje += `• Mensualidad: S/ ${Number(ciclo.montoMensualidadVirtual || 0).toFixed(2)}\n`;
-    if (index !== rows.length - 1) mensaje += `\n──────────────────────\n\n`;
-  });
-  mensaje += `\n✨ ¡Inscríbete ya!\n👉 https://inscripciones.academiapreuniversitariaelite.com/`;
-
-  return sendTextUrl(to, mensaje);
 }
 
 async function construirMensajeSolicitud({
