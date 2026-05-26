@@ -268,12 +268,74 @@ app.post("/notify-solicitud", async (req, res) => {
       const cfg = await getConfiguracion();
       const destino = normalizarTelefonoPeru(req.body.whatsapp);
       if (destino) {
-        const msgCliente = construirMensajeCliente({ ...req.body, _cfg: cfg });
-        await sendText(destino, msgCliente);
+        const empresa = cfg?.nombre_empresa || "la academia";
+        const { nombre, ciclo, solicitudId } = req.body;
+        const codigo = solicitudId
+          ? `SOL-${String(solicitudId).padStart(6, "0")}`
+          : "tu solicitud";
+        // Para leads fríos (nunca escribieron al bot) el texto libre NO se
+        // entrega: se usa plantilla aprobada si está configurada en el entorno.
+        const plantilla = process.env.WHATSAPP_TEMPLATE_CONFIRMACION;
+        if (plantilla) {
+          await sendTemplate(destino, plantilla, [
+            nombre || "",
+            ciclo || empresa,
+            codigo,
+          ]);
+        } else {
+          await sendText(destino, construirMensajeCliente({ ...req.body, _cfg: cfg }));
+        }
         console.log(`notify-solicitud → WhatsApp (cliente) enviado a ${destino}`);
       }
     } catch (err) {
       console.error("notify-solicitud cliente error →", err.response?.data ?? err.message);
+    }
+  })();
+});
+
+/* =====================================================================
+   Endpoint interno: matrícula aprobada
+   Lo llama el backend al aprobar una solicitud. Envía al cliente el link
+   público con sus horarios y cronograma de pagos.
+   ===================================================================== */
+app.post("/notify-aprobacion", async (req, res) => {
+  const token = req.headers["x-internal-token"];
+  if (token !== process.env.NOTIFY_INTERNAL_TOKEN) {
+    return res.status(401).json({ ok: false, error: "no autorizado" });
+  }
+  res.status(202).json({ ok: true, queued: true });
+
+  ;(async () => {
+    try {
+      const { nombre, whatsapp, ciclo, canal, carrera } = req.body;
+      const destino = normalizarTelefonoPeru(whatsapp);
+      if (!destino) return;
+
+      const base = (process.env.MATRICULA_PUBLICA_URL || "https://matricula-publica.vercel.app")
+        .replace(/\/$/, "");
+      const link = `${base}/mi-matricula/${req.body.token}`;
+      const detalle = [ciclo, canal && `Canal: ${canal}`, carrera]
+        .filter(Boolean)
+        .join(" — ");
+
+      const plantilla = process.env.WHATSAPP_TEMPLATE_APROBACION;
+      if (plantilla) {
+        await sendTemplate(destino, plantilla, [nombre || "", detalle || ciclo || "", link]);
+      } else {
+        const lineas = [
+          `¡Felicidades ${nombre || ""}! 🎉`.trim(),
+          "",
+          `✅ Tu *matrícula* fue *aprobada*.`,
+        ];
+        if (detalle) lineas.push(`📘 ${detalle}`);
+        lineas.push("");
+        lineas.push(`Aquí están tus *horarios* y *cronograma de pagos*:`);
+        lineas.push(link);
+        await sendTextUrl(destino, lineas.join("\n"));
+      }
+      console.log(`notify-aprobacion → WhatsApp enviado a ${destino}`);
+    } catch (err) {
+      console.error("notify-aprobacion error →", err.response?.data ?? err.message);
     }
   })();
 });
@@ -306,6 +368,48 @@ async function sendText(to, body) {
     return data;
   } catch (err) {
     console.error("WA error →", err.response?.data ?? err.message);
+    throw err;
+  }
+}
+
+/**
+ * Envía un mensaje de PLANTILLA aprobada (HSM). Es la única forma de escribir a
+ * un número fuera de la ventana de 24h (leads fríos de campañas). La plantilla
+ * debe existir y estar aprobada en WhatsApp Manager.
+ * @param {string[]} bodyParams Variables {{1}}, {{2}}... del cuerpo, en orden.
+ */
+async function sendTemplate(to, templateName, bodyParams = [], lang = "es") {
+  try {
+    const { data } = await axios.post(
+      `https://graph.facebook.com/v23.0/${process.env.PHONE_NUMBER_ID}/messages`,
+      {
+        messaging_product: "whatsapp",
+        recipient_type: "individual",
+        to,
+        type: "template",
+        template: {
+          name: templateName,
+          language: { code: lang },
+          components: bodyParams.length
+            ? [
+                {
+                  type: "body",
+                  parameters: bodyParams.map((t) => ({ type: "text", text: String(t) })),
+                },
+              ]
+            : [],
+        },
+      },
+      {
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}`,
+        },
+      }
+    );
+    return data;
+  } catch (err) {
+    console.error("WA template error →", err.response?.data ?? err.message);
     throw err;
   }
 }
