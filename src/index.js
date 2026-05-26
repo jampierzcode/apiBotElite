@@ -122,45 +122,27 @@ app.post("/notify-solicitud", async (req, res) => {
     return res.status(401).json({ ok: false, error: "no autorizado" });
   }
 
-  try {
-    const {
-      nombre,
-      apellido,
-      dni,
-      whatsapp,
-      ciclo,
-      modalidad,
-      turno,
-      sede,
-      solicitudId,
-    } = req.body;
+  // Responder de inmediato para que el backend no espere (evita el 499 por
+  // timeout). El envío del WhatsApp se hace en segundo plano.
+  res.status(202).json({ ok: true, queued: true });
 
-    const numero = await getWhatsappNotificaciones();
-    if (!numero) {
-      return res.status(200).json({
-        ok: false,
-        warning: "Sin número de notificaciones configurado",
-      });
+  // Trabajo en background: no bloquea la respuesta ya enviada arriba.
+  ;(async () => {
+    try {
+      const cfg = await getConfiguracion(); // una sola consulta a la BD
+      const numero = cfg?.whatsapp_notificaciones || null;
+      if (!numero) {
+        console.warn("notify-solicitud → sin número de notificaciones configurado");
+        return;
+      }
+
+      const mensaje = await construirMensajeSolicitud({ ...req.body, _cfg: cfg });
+      await sendText(numero, mensaje);
+      console.log(`notify-solicitud → WhatsApp enviado a ${numero}`);
+    } catch (err) {
+      console.error("notify-solicitud bg error →", err.response?.data ?? err.message);
     }
-
-    const mensaje = await construirMensajeSolicitud({
-      nombre,
-      apellido,
-      dni,
-      whatsapp,
-      ciclo,
-      modalidad,
-      turno,
-      sede,
-      solicitudId,
-    });
-
-    const data = await sendText(numero, mensaje);
-    return res.json({ ok: true, data });
-  } catch (err) {
-    console.error("notify-solicitud error →", err.response?.data ?? err.message);
-    return res.status(500).json({ ok: false, error: err.message });
-  }
+  })();
 });
 
 /* Health */
@@ -286,8 +268,9 @@ async function construirMensajeSolicitud({
   turno,
   sede,
   solicitudId,
+  _cfg,
 }) {
-  const cfg = await getConfiguracion();
+  const cfg = _cfg || (await getConfiguracion());
   const adminUrl = (cfg?.admin_url || "").trim();
 
   const lineas = [
