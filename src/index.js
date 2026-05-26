@@ -256,9 +256,24 @@ app.post("/notify-solicitud", async (req, res) => {
 
       const mensaje = await construirMensajeSolicitud({ ...req.body, _cfg: cfg });
       await sendText(numero, mensaje);
-      console.log(`notify-solicitud → WhatsApp enviado a ${numero}`);
+      console.log(`notify-solicitud → WhatsApp (admin) enviado a ${numero}`);
     } catch (err) {
-      console.error("notify-solicitud bg error →", err.response?.data ?? err.message);
+      console.error("notify-solicitud admin error →", err.response?.data ?? err.message);
+    }
+
+    // Confirmación al CLIENTE que dejó su número en la matrícula pública.
+    // Va aparte: si falla (p. ej. número fuera de la ventana de 24h de Meta),
+    // no afecta la notificación al admin.
+    try {
+      const cfg = await getConfiguracion();
+      const destino = normalizarTelefonoPeru(req.body.whatsapp);
+      if (destino) {
+        const msgCliente = construirMensajeCliente({ ...req.body, _cfg: cfg });
+        await sendText(destino, msgCliente);
+        console.log(`notify-solicitud → WhatsApp (cliente) enviado a ${destino}`);
+      }
+    } catch (err) {
+      console.error("notify-solicitud cliente error →", err.response?.data ?? err.message);
     }
   })();
 });
@@ -371,6 +386,53 @@ async function construirMensajeSolicitud({
     lineas.push("Revisa la solicitud en el sistema para aprobarla.");
   }
   return lineas.join("\n");
+}
+
+/**
+ * Mensaje de confirmación que recibe el CLIENTE que llenó la matrícula pública.
+ */
+function construirMensajeCliente({
+  nombre,
+  ciclo,
+  modalidad,
+  turno,
+  sede,
+  solicitudId,
+  _cfg,
+}) {
+  const empresa = _cfg?.nombre_empresa || "nuestra academia";
+  const lineas = [
+    `¡Hola ${nombre || ""}! 👋`.trim(),
+    "",
+    `✅ Recibimos tu *solicitud de matrícula* en *${empresa}*.`,
+  ];
+  if (ciclo)
+    lineas.push(
+      `📘 Ciclo: *${ciclo}*${modalidad ? ` (${modalidad}${turno ? " — " + turno : ""})` : ""}`
+    );
+  if (sede) lineas.push(`📍 Sede: ${sede}`);
+  if (solicitudId)
+    lineas.push(`🧾 Código: *SOL-${String(solicitudId).padStart(6, "0")}*`);
+  lineas.push("");
+  lineas.push(
+    "En breve un asesor te contactará por este medio para confirmar tu matrícula. ¡Gracias por elegirnos! 🎓"
+  );
+  return lineas.join("\n");
+}
+
+/**
+ * Normaliza un teléfono a formato internacional E.164 sin '+' para WhatsApp.
+ * Para Perú: un celular de 9 dígitos que empieza en 9 se prefija con 51.
+ * Devuelve null si no parece un número válido.
+ */
+function normalizarTelefonoPeru(raw) {
+  if (!raw) return null;
+  let n = String(raw).replace(/\D/g, "");
+  if (!n) return null;
+  if (n.length === 9 && n.startsWith("9")) n = "51" + n; // celular PE sin código país
+  // Si ya viene con 51 y 11 dígitos, o es otro formato internacional, se deja.
+  if (n.length < 8) return null;
+  return n;
 }
 
 /* =====================================================================
