@@ -19,9 +19,9 @@ ya te escribieron).
 ## Plantilla 1 — Confirmación de solicitud
 - **Nombre sugerido:** `solicitud_recibida`
 - **Categoría:** Utility · **Idioma:** es
-- **Cuerpo:**
+- **Cuerpo** (no debe terminar en variable, por eso lleva texto al final):
   ```
-  ¡Hola {{1}}! ✅ Recibimos tu solicitud de matrícula en {{2}}. En breve un asesor te contactará para confirmar. Código: {{3}}
+  ¡Hola {{1}}! ✅ Recibimos tu solicitud de matrícula en {{2}}. En breve un asesor te contactará para confirmar. Código: {{3}}. ¡Gracias!
   ```
 - **Variables:** `{{1}}`=nombre, `{{2}}`=ciclo/empresa, `{{3}}`=código (SOL-000123)
 - **Ejemplo para Meta:** {{1}}=Jampier · {{2}}=CICLO ESCOLAR · {{3}}=SOL-000123
@@ -29,9 +29,9 @@ ya te escribieron).
 ## Plantilla 2 — Matrícula aprobada
 - **Nombre sugerido:** `matricula_aprobada`
 - **Categoría:** Utility · **Idioma:** es
-- **Cuerpo:**
+- **Cuerpo** (no debe terminar en variable, por eso lleva texto al final):
   ```
-  ¡Felicidades {{1}}! 🎉 Tu matrícula en {{2}} fue aprobada. Revisa tus horarios y cronograma de pagos aquí: {{3}}
+  ¡Felicidades {{1}}! 🎉 Tu matrícula en {{2}} fue aprobada. Revisa tus horarios y cronograma de pagos aquí: {{3}} ¡Te esperamos!
   ```
 - **Variables:** `{{1}}`=nombre, `{{2}}`=ciclo — canal — carrera, `{{3}}`=link público
 - **Ejemplo para Meta:** {{1}}=Jampier · {{2}}=CICLO ESCOLAR — Canal: Canal 2 — Ingeniería Civil · {{3}}=https://matricula-publica.vercel.app/mi-matricula/abc123
